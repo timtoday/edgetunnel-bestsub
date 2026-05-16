@@ -255,9 +255,9 @@ function setLoading(running, lastError, hasResult, statusData) {
       progressContainer.className = "progress-system success";
       updateProgress(100, "Completed!");
       if (statusData && statusData.last_success === 0) {
-        progressStatus.textContent = `扫描了 ${statusData.last_candidates} 个候选 IP，但没有一个测速成功。`;
+        progressStatus.innerHTML = `扫描了 <strong class="result-count muted">${statusData.last_candidates}</strong> 个候选 IP，但没有一个测速成功。`;
       } else {
-        progressStatus.textContent = `测速完成，共发现 ${statusData?.last_success || 0} 个有效 IP。`;
+        progressStatus.innerHTML = `测速完成，共发现 <strong class="result-count">${statusData?.last_success || 0}</strong> 个有效 IP。`;
       }
     } else {
       progressContainer.className = "progress-system";
