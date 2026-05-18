@@ -79,6 +79,8 @@ type AutoProxyIPConfig struct {
 	Country           string                  `yaml:"country" json:"country"`
 	Limit             int                     `yaml:"limit" json:"limit"`
 	SourceURL         string                  `yaml:"source_url" json:"source_url"`
+	CheckAPI          string                  `yaml:"check_api" json:"check_api"`
+	Concurrency       int                     `yaml:"concurrency" json:"concurrency"`
 	RequireGeoIPMatch bool                    `yaml:"require_geoip_match" json:"require_geoip_match"`
 	GeoIPDBPath       string                  `yaml:"geoip_db_path" json:"geoip_db_path"`
 	WorkerVerify      AutoProxyIPVerifyConfig `yaml:"worker_verify" json:"worker_verify"`
@@ -232,6 +234,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Clash.AutoProxyIP.SourceURL == "" {
 		c.Clash.AutoProxyIP.SourceURL = "https://zip.cm.edu.kg/all.txt"
+	}
+	if c.Clash.AutoProxyIP.CheckAPI == "" {
+		c.Clash.AutoProxyIP.CheckAPI = "https://api.090227.xyz/check?proxyip=%s"
+	}
+	if c.Clash.AutoProxyIP.Concurrency <= 0 {
+		c.Clash.AutoProxyIP.Concurrency = 20
 	}
 	if c.Clash.AutoProxyIP.GeoIPDBPath == "" {
 		c.Clash.AutoProxyIP.GeoIPDBPath = c.Probe.GeoIPDBPath

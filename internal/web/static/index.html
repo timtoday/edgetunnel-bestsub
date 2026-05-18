@@ -77,6 +77,16 @@
     <section class="panel proxyip-panel">
       <div class="section-head">
         <h2><i data-lucide="network" style="color:#0071e3"></i> 自动反代 IP</h2>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div class="proxyip-dropdown" id="proxyipDropdown">
+            <button type="button" class="proxyip-dropdown-trigger" id="proxyipDropdownTrigger">
+              <span id="proxyipDropdownLabel">🇺🇸 美国 (US)</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="proxyip-dropdown-menu hidden" id="proxyipDropdownMenu"></div>
+          </div>
+          <button id="proxyipFetchBtn" class="secondary" style="padding: 8px 20px; font-size: 14px;"><i data-lucide="refresh-cw" style="width:14px;height:14px;margin-bottom:-2px;margin-right:4px;"></i>单独刷新反代 IP</button>
+        </div>
       </div>
       <div id="proxyipSummary" class="proxyip-summary muted">测速后会显示可推送的 PROXYIP。</div>
     </section>

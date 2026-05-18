@@ -152,6 +152,18 @@ geoip_db_path: "GeoLite2-Country.mmdb"
 
 开启后需要自行从 MaxMind 下载 GeoLite2 Country 数据库，并把 `GeoLite2-Country.mmdb` 放到程序运行目录，或把 `geoip_db_path` 改成实际文件路径。如果文件不存在，程序不会自动下载。
 
+快捷下载（社区镜像，无需注册）：
+
+```powershell
+# Windows PowerShell
+Invoke-WebRequest -Uri "https://git.io/GeoLite2-Country.mmdb" -OutFile "GeoLite2-Country.mmdb"
+```
+
+```bash
+# Linux / macOS
+curl -L -o GeoLite2-Country.mmdb https://git.io/GeoLite2-Country.mmdb
+```
+
 ## ADD.txt 格式
 
 程序会生成兼容 EdgeTunnel Worker 的文本格式，IPv6 会自动使用方括号：

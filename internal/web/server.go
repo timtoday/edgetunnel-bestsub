@@ -1,15 +1,20 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"encoding/json"
+	"log"
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +47,122 @@ type Server struct {
 }
 
 func New(configPath string, cfg config.Config) *Server {
-	return &Server{configPath: configPath, cfg: cfg}
+	s := &Server{configPath: configPath, cfg: cfg}
+	s.loadADDFromDisk()
+	return s
+}
+
+// loadADDFromDisk 启动时从本地 ADD.txt 恢复上次结果，避免重启后必须重新测速。
+func (s *Server) loadADDFromDisk() {
+	path := s.cfg.Output.Path
+	if path == "" {
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	var results []probe.Result
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		result := parseADDLine(line)
+		if result.IP != "" && result.Port > 0 {
+			results = append(results, result)
+		}
+	}
+	if len(results) == 0 {
+		return
+	}
+	addText := probe.FormatADD(results, s.cfg.Output.RemarkPrefix)
+	s.last = &app.RunResult{
+		Top:        results,
+		ADDText:    addText,
+		OutputPath: path,
+	}
+	// 恢复 PROXYIP.txt
+	proxyIPPath := proxyIPFilePath(path)
+	if data, err := os.ReadFile(proxyIPPath); err == nil {
+		content := strings.TrimSpace(string(data))
+		if content != "" {
+			s.last.AutoProxyIPs = content
+		}
+	}
+	log.Printf("[startup] 从 %s 恢复了 %d 条历史结果", path, len(results))
+	if s.last.AutoProxyIPs != "" {
+		log.Printf("[startup] 从 %s 恢复了反代 IP: %s", proxyIPPath, s.last.AutoProxyIPs)
+	}
+}
+
+// proxyIPFilePath 根据 ADD.txt 路径推导 PROXYIP.txt 路径
+func proxyIPFilePath(addPath string) string {
+	dir := ""
+	if idx := strings.LastIndexAny(addPath, "/\\"); idx >= 0 {
+		dir = addPath[:idx+1]
+	}
+	return dir + "PROXYIP.txt"
+}
+
+func (s *Server) saveProxyIPToDisk(content string) {
+	path := proxyIPFilePath(s.cfg.Output.Path)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		log.Printf("[proxyip] 保存 %s 失败: %v", path, err)
+	} else {
+		log.Printf("[proxyip] 已保存反代 IP 到 %s", path)
+	}
+}
+
+// parseADDLine 解析 ADD.txt 的一行，格式: IP:端口#备注 或 [IPv6]:端口#备注
+func parseADDLine(line string) probe.Result {
+	address, remark, _ := strings.Cut(line, "#")
+	address = strings.TrimSpace(address)
+	remark = strings.TrimSpace(remark)
+
+	var ip string
+	var port int
+
+	if strings.HasPrefix(address, "[") {
+		// IPv6: [addr]:port
+		end := strings.LastIndex(address, "]:")
+		if end < 0 {
+			return probe.Result{}
+		}
+		ip = address[1:end]
+		p, err := strconv.Atoi(address[end+2:])
+		if err != nil || p <= 0 {
+			return probe.Result{}
+		}
+		port = p
+	} else {
+		// IPv4: addr:port
+		host, portStr, ok := strings.Cut(address, ":")
+		if !ok {
+			return probe.Result{}
+		}
+		p, err := strconv.Atoi(portStr)
+		if err != nil || p <= 0 {
+			return probe.Result{}
+		}
+		ip = host
+		port = p
+	}
+
+	// 验证 IP 合法性
+	if _, err := netip.ParseAddr(ip); err != nil {
+		return probe.Result{}
+	}
+
+	return probe.Result{
+		IP:      ip,
+		Port:    port,
+		Remark:  remark,
+		Success: true,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -54,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/config/update", s.handleConfigUpdate)
 	mux.HandleFunc("/api/preflight", s.handlePreflight)
 	mux.HandleFunc("/api/probe/run", s.handleRun)
+	mux.HandleFunc("/api/proxyip/fetch", s.handleProxyIPFetch)
 	mux.HandleFunc("/api/worker/push", s.handlePush)
 	mux.HandleFunc("/api/worker/proxyip", s.handleProxyIPPush)
 	mux.HandleFunc("/api/clash/generate", s.handleClashGenerate)
@@ -161,6 +282,54 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 			s.lastError = err.Error()
 		} else {
 			s.last = &result
+			if result.AutoProxyIPs != "" {
+				s.saveProxyIPToDisk(result.AutoProxyIPs)
+			}
+		}
+		s.running = false
+	}()
+
+	writeJSON(w, map[string]any{"started": true})
+}
+
+func (s *Server) handleProxyIPFetch(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	if s.running {
+		s.mu.Unlock()
+		http.Error(w, "probe is already running", http.StatusConflict)
+		return
+	}
+	if !s.cfg.Clash.AutoProxyIP.Enabled {
+		s.mu.Unlock()
+		http.Error(w, "proxyip_auto 未启用，请在配置中设置 clash.proxyip_auto.enabled: true", http.StatusBadRequest)
+		return
+	}
+	s.running = true
+	s.lastError = ""
+	cfg := s.cfg
+	// 支持前端传入国家覆盖配置
+	if country := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("country"))); country != "" {
+		cfg.Clash.AutoProxyIP.Country = country
+		// 持久化到配置文件
+		s.cfg.Clash.AutoProxyIP.Country = country
+		_ = s.cfg.Save(s.configPath)
+	}
+	s.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		result, err := app.FetchProxyIPOnly(ctx, cfg)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err != nil {
+			s.lastError = err.Error()
+		} else {
+			if s.last == nil {
+				s.last = &app.RunResult{}
+			}
+			s.last.AutoProxyIPs = result
+			s.saveProxyIPToDisk(result)
 		}
 		s.running = false
 	}()

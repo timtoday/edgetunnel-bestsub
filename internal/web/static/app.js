@@ -14,6 +14,12 @@ const modeToggle = document.querySelector("#modeToggle");
 const loadingOverlay = document.querySelector("#loadingOverlay");
 const loadingText = document.querySelector("#loadingText");
 const proxyipSummary = document.querySelector("#proxyipSummary");
+const proxyipFetchBtn = document.querySelector("#proxyipFetchBtn");
+const proxyipDropdown = document.querySelector("#proxyipDropdown");
+const proxyipDropdownTrigger = document.querySelector("#proxyipDropdownTrigger");
+const proxyipDropdownLabel = document.querySelector("#proxyipDropdownLabel");
+const proxyipDropdownMenu = document.querySelector("#proxyipDropdownMenu");
+let proxyipSelectedCountry = "US";
 
 const progressContainer = document.querySelector("#progressContainer");
 const progressBarFill = document.querySelector("#progressBarFill");
@@ -120,6 +126,7 @@ async function loadConfig() {
   clashReady = Boolean(cfg.clash?.local_profile_dir);
   clashBtn.title = clashReady ? "生成并写入 Clash Verge profiles 目录" : "请先在 config.yaml 配置 clash.local_profile_dir";
   renderCountryOptions(cfg.probe.countries || []);
+  renderProxyIPCountrySelect(cfg.clash?.proxyip_auto?.country || "US");
   setDL(configView, [
     ["配置文件", data.config_path],
     ["监听地址", cfg.server.listen],
@@ -147,11 +154,11 @@ async function refresh() {
     latestAutoProxyIPs = latest.auto_proxy_ips || "";
     proxyPushBtn.disabled = status.running || !latestAutoProxyIPs;
     renderProxyIPSummary(latestAutoProxyIPs);
-    if (latest.top.length === 0 && status.last_success > 0) {
+    if (latest.top && latest.top.length === 0 && status.last_success > 0) {
       // Logic for filtered out but found IPs
       progressStatus.textContent = `找到了 ${status.last_success} 个有效 IP，但都不符合国家筛选条件。`;
     }
-    resultRows.innerHTML = latest.top.map(row => `
+    resultRows.innerHTML = (latest.top || []).map(row => `
       <tr>
         <td>${escapeHTML(row.ip)}</td>
         <td>${row.port}</td>
@@ -240,6 +247,45 @@ async function pushProxyIP() {
   }
 }
 
+async function fetchProxyIPOnly() {
+  proxyipFetchBtn.disabled = true;
+  proxyipSummary.className = "proxyip-summary muted";
+  proxyipSummary.textContent = "正在刷新反代 IP...";
+
+  // 先检测环境
+  const report = await checkEnvironment();
+  if (report.blocked) {
+    showAlert("环境检测未通过。请关闭代理后再刷新反代 IP。", "环境异常", "error");
+    proxyipFetchBtn.disabled = false;
+    await refresh();
+    return;
+  }
+
+  try {
+    await getJSON("/api/proxyip/fetch?country=" + encodeURIComponent(proxyipSelectedCountry), { method: "POST" });
+    // 轮询等待完成
+    let attempts = 0;
+    while (attempts < 120) {
+      await new Promise(r => setTimeout(r, 2000));
+      const status = await getJSON("/api/status");
+      if (!status.running) {
+        if (status.last_error) {
+          showAlert("反代 IP 刷新失败: " + status.last_error, "错误", "error");
+        } else {
+          showAlert("反代 IP 刷新完成", "成功", "success");
+        }
+        break;
+      }
+      attempts++;
+    }
+  } catch (err) {
+    showAlert("反代 IP 刷新失败: " + err.message, "错误", "error");
+  } finally {
+    proxyipFetchBtn.disabled = false;
+    await refresh();
+  }
+}
+
 async function generateClash() {
   if (!clashReady) {
     showAlert("请先在 config.yaml 配置 clash.local_profile_dir 后重启程序。", "未配置 Clash 目录", "warning");
@@ -319,6 +365,20 @@ function renderCountryOptions(selected) {
   )).join("");
 }
 
+function renderProxyIPCountrySelect(current) {
+  proxyipSelectedCountry = current || "US";
+  const match = countryOptions.find(([code]) => code === proxyipSelectedCountry);
+  if (match) {
+    proxyipDropdownLabel.textContent = `${getFlagEmoji(match[0])} ${match[1]} (${match[0]})`;
+  }
+  proxyipDropdownMenu.innerHTML = countryOptions.map(([code, name]) =>
+    `<div class="proxyip-dropdown-item ${code === proxyipSelectedCountry ? "selected" : ""}" data-code="${code}">
+      <span>${getFlagEmoji(code)}</span>
+      <span>${name} (${code})</span>
+    </div>`
+  ).join("");
+}
+
 function selectedCountries() {
   return Array.from(countrySelect.querySelectorAll(".country-chip.selected")).map(button => button.dataset.code);
 }
@@ -388,6 +448,25 @@ runBtn.addEventListener("click", () => start().catch(err => showAlert(err.messag
 clashBtn.addEventListener("click", () => generateClash().catch(err => showAlert(err.message, "执行失败", "error")));
 pushBtn.addEventListener("click", () => push().catch(err => showAlert(err.message, "执行失败", "error")));
 proxyPushBtn.addEventListener("click", () => pushProxyIP().catch(err => showAlert(err.message, "执行失败", "error")));
+proxyipFetchBtn.addEventListener("click", () => fetchProxyIPOnly().catch(err => showAlert(err.message, "执行失败", "error")));
+
+// ProxyIP country dropdown
+proxyipDropdownTrigger.addEventListener("click", (e) => {
+  e.stopPropagation();
+  proxyipDropdownMenu.classList.toggle("hidden");
+});
+proxyipDropdownMenu.addEventListener("click", (e) => {
+  const item = e.target.closest(".proxyip-dropdown-item");
+  if (!item) return;
+  proxyipSelectedCountry = item.dataset.code;
+  renderProxyIPCountrySelect(proxyipSelectedCountry);
+  proxyipDropdownMenu.classList.add("hidden");
+});
+document.addEventListener("click", () => {
+  proxyipDropdownMenu.classList.add("hidden");
+});
+proxyipDropdown.addEventListener("click", (e) => e.stopPropagation());
+
 checkBtn.addEventListener("click", () => checkEnvironment().catch(err => showAlert(err.message, "检测失败", "error")));
 clearCountryBtn.addEventListener("click", () => {
   for (const button of countrySelect.querySelectorAll(".country-chip.selected")) {

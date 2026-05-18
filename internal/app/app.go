@@ -87,6 +87,8 @@ func RunOnceMode(ctx context.Context, cfg config.Config, push bool, mode string)
 			Country:           cfg.Clash.AutoProxyIP.Country,
 			Limit:             cfg.Clash.AutoProxyIP.Limit,
 			SourceURL:         cfg.Clash.AutoProxyIP.SourceURL,
+			CheckAPI:          cfg.Clash.AutoProxyIP.CheckAPI,
+			Concurrency:       cfg.Clash.AutoProxyIP.Concurrency,
 			RequireGeoIPMatch: cfg.Clash.AutoProxyIP.RequireGeoIPMatch,
 			GeoIPDBPath:       cfg.Clash.AutoProxyIP.GeoIPDBPath,
 			WorkerVerify: proxyip.WorkerVerifyOptions{
@@ -124,6 +126,56 @@ func RunOnceMode(ctx context.Context, cfg config.Config, push bool, mode string)
 		run.Pushed = true
 	}
 	return run, nil
+}
+
+// FetchProxyIPOnly 单独执行反代 IP 优选流程，不触发入口 IP 测速。
+func FetchProxyIPOnly(ctx context.Context, cfg config.Config) (string, error) {
+	if !cfg.Clash.AutoProxyIP.Enabled {
+		return "", fmt.Errorf("proxyip_auto 未启用")
+	}
+
+	// 如果 worker_verify 开启，先验证登录
+	var workerClient *worker.Client
+	if cfg.Clash.AutoProxyIP.WorkerVerify.Enabled {
+		c, err := worker.New(cfg)
+		if err != nil {
+			return "", fmt.Errorf("Worker 连接失败: %w", err)
+		}
+		if err := c.Login(ctx); err != nil {
+			return "", fmt.Errorf("login: %w", err)
+		}
+		workerClient = c
+	}
+
+	fetchOpts := proxyip.Options{
+		Country:           cfg.Clash.AutoProxyIP.Country,
+		Limit:             cfg.Clash.AutoProxyIP.Limit,
+		SourceURL:         cfg.Clash.AutoProxyIP.SourceURL,
+		CheckAPI:          cfg.Clash.AutoProxyIP.CheckAPI,
+		Concurrency:       cfg.Clash.AutoProxyIP.Concurrency,
+		RequireGeoIPMatch: cfg.Clash.AutoProxyIP.RequireGeoIPMatch,
+		GeoIPDBPath:       cfg.Clash.AutoProxyIP.GeoIPDBPath,
+		WorkerVerify: proxyip.WorkerVerifyOptions{
+			Enabled:   cfg.Clash.AutoProxyIP.WorkerVerify.Enabled,
+			URL:       cfg.Clash.AutoProxyIP.WorkerVerify.URL,
+			MaxChecks: cfg.Clash.AutoProxyIP.WorkerVerify.MaxChecks,
+		},
+		WorkerBaseURL:  cfg.Worker.BaseURL,
+		WorkerPassword: cfg.Worker.Password,
+		UserAgent:      cfg.Worker.UserAgent,
+	}
+	if workerClient != nil {
+		fetchOpts.WorkerHTTPClient = workerClient.HTTPClient()
+	}
+
+	fetchedIPs, err := proxyip.FetchAndCheck(ctx, fetchOpts)
+	if err != nil {
+		return "", err
+	}
+	if len(fetchedIPs) == 0 {
+		return "", fmt.Errorf("未找到符合条件的反代 IP")
+	}
+	return strings.Join(fetchedIPs, ","), nil
 }
 
 func normalizeMode(mode string) string {

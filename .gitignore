@@ -1,6 +1,8 @@
 /bestsub.exe
 /bestsub
 /ADD.txt
+/PROXYIP.txt
+/.vscode/
 /configs/config.yaml
 /dist/
 /tmp/

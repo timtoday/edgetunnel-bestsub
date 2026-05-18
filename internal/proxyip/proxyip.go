@@ -36,6 +36,8 @@ type Options struct {
 	Country           string
 	Limit             int
 	SourceURL         string
+	CheckAPI          string
+	Concurrency       int
 	RequireGeoIPMatch bool
 	GeoIPDBPath       string
 	WorkerVerify      WorkerVerifyOptions
@@ -111,28 +113,30 @@ func FetchAndCheck(ctx context.Context, opts Options) ([]string, error) {
 	}
 	log.Printf("Found %d candidate proxy IPs for country %s", len(candidates), country)
 
-	// 3. Check latency concurrently
-	validResults := checkLatency(ctx, client, candidates)
+	// 3. GeoIP filter (local DB, no network cost) — before latency check to reduce candidates
+	if opts.RequireGeoIPMatch {
+		filtered, err := filterGeoIPCandidates(candidates, opts.GeoIPDBPath, country)
+		if err != nil {
+			return nil, err
+		}
+		candidates = filtered
+		if len(candidates) == 0 {
+			return nil, fmt.Errorf("no proxy IPs left after GeoIP country filter")
+		}
+		log.Printf("GeoIP filter kept %d candidates", len(candidates))
+	}
+
+	// 4. Check latency concurrently
+	validResults := checkLatency(ctx, client, candidates, opts.CheckAPI, opts.Concurrency)
 
 	if len(validResults) == 0 {
 		return nil, fmt.Errorf("no valid proxy IPs after latency check")
 	}
 
-	// 4. Sort by ResponseTime ascending
+	// 5. Sort by ResponseTime ascending
 	sort.Slice(validResults, func(i, j int) bool {
 		return validResults[i].ResponseTime < validResults[j].ResponseTime
 	})
-
-	if opts.RequireGeoIPMatch {
-		filtered, err := filterGeoIPCountry(validResults, opts.GeoIPDBPath, country)
-		if err != nil {
-			return nil, err
-		}
-		validResults = filtered
-		if len(validResults) == 0 {
-			return nil, fmt.Errorf("no valid proxy IPs after GeoIP country check")
-		}
-	}
 
 	if opts.WorkerVerify.Enabled {
 		filtered, err := filterWorkerExitCountry(ctx, opts, validResults, country)
@@ -158,10 +162,13 @@ func FetchAndCheck(ctx context.Context, opts Options) ([]string, error) {
 	return finalIPs, nil
 }
 
-func checkLatency(ctx context.Context, client *http.Client, candidates []string) []ProxyIPResult {
+func checkLatency(ctx context.Context, client *http.Client, candidates []string, checkAPI string, concurrency int) []ProxyIPResult {
 	var wg sync.WaitGroup
 	resultsChan := make(chan ProxyIPResult, len(candidates))
-	sem := make(chan struct{}, 20) // Limit concurrency to 20
+	if concurrency <= 0 {
+		concurrency = 20
+	}
+	sem := make(chan struct{}, concurrency)
 
 	for _, ip := range candidates {
 		wg.Add(1)
@@ -174,7 +181,7 @@ func checkLatency(ctx context.Context, client *http.Client, candidates []string)
 				return
 			}
 
-			checkURL := fmt.Sprintf("https://api.090227.xyz/check?proxyip=%s", url.QueryEscape(targetIP))
+			checkURL := fmt.Sprintf(checkAPI, url.QueryEscape(targetIP))
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, checkURL, nil)
 			if err != nil {
 				return
@@ -242,6 +249,48 @@ func filterGeoIPCountry(results []ProxyIPResult, dbPath string, country string) 
 	return out, nil
 }
 
+// verifyExitIPGeoIP 验证出口 IP 的 GeoIP 注册归属地是否匹配目标国家
+func verifyExitIPGeoIP(addr netip.Addr, dbPath string, country string) bool {
+	if dbPath == "" {
+		return true // 没有数据库则跳过验证
+	}
+	db, err := geoip2.Open(dbPath)
+	if err != nil {
+		return true // 打不开数据库则跳过
+	}
+	defer db.Close()
+	record, err := db.Country(net.ParseIP(addr.String()))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(record.Country.IsoCode, country)
+}
+
+// filterGeoIPCandidates 在延迟检测前用本地 GeoIP 数据库过滤候选 IP
+func filterGeoIPCandidates(candidates []string, dbPath string, country string) ([]string, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("geoip_db_path is required when require_geoip_match is true")
+	}
+	db, err := geoip2.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open GeoIP DB: %w", err)
+	}
+	defer db.Close()
+
+	out := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		addr, err := proxyIPAddr(candidate)
+		if err != nil {
+			continue
+		}
+		record, err := db.Country(net.ParseIP(addr.String()))
+		if err == nil && strings.EqualFold(record.Country.IsoCode, country) {
+			out = append(out, candidate)
+		}
+	}
+	return out, nil
+}
+
 func filterWorkerExitCountry(ctx context.Context, opts Options, results []ProxyIPResult, country string) ([]ProxyIPResult, error) {
 	if opts.WorkerBaseURL == "" {
 		return nil, fmt.Errorf("worker.base_url is required when worker_verify.enabled is true")
@@ -277,14 +326,28 @@ func filterWorkerExitCountry(ctx context.Context, opts Options, results []ProxyI
 			log.Printf("Worker proxyip test failed for %s: %v", result.IP, err)
 			continue
 		}
-		if test.Success && strings.EqualFold(test.Country, country) {
-			if test.ResponseTime > 0 {
-				result.ResponseTime = test.ResponseTime
-			}
-			out = append(out, result)
-		} else {
-			log.Printf("Worker proxyip test rejected %s: success=%v country=%s error=%s", result.IP, test.Success, test.Country, test.Error)
+		if !test.Success {
+			log.Printf("Worker proxyip test rejected %s: success=false error=%s", result.IP, test.Error)
+			continue
 		}
+		// 用本地 GeoIP 数据库验证出口 IP 的注册归属地
+		if test.IP == "" {
+			log.Printf("Worker proxyip test rejected %s: no exit IP returned", result.IP)
+			continue
+		}
+		exitAddr, parseErr := netip.ParseAddr(test.IP)
+		if parseErr != nil {
+			log.Printf("Worker proxyip test rejected %s: invalid exit IP %s", result.IP, test.IP)
+			continue
+		}
+		if !verifyExitIPGeoIP(exitAddr, opts.GeoIPDBPath, country) {
+			log.Printf("Worker proxyip test rejected %s: exit IP %s not registered in %s", result.IP, test.IP, country)
+			continue
+		}
+		if test.ResponseTime > 0 {
+			result.ResponseTime = test.ResponseTime
+		}
+		out = append(out, result)
 		if len(out) >= opts.Limit {
 			break
 		}
