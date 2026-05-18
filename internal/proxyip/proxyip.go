@@ -330,6 +330,11 @@ func filterWorkerExitCountry(ctx context.Context, opts Options, results []ProxyI
 			log.Printf("Worker proxyip test rejected %s: success=false error=%s", result.IP, test.Error)
 			continue
 		}
+		// 验证机房位置匹配目标国家
+		if !strings.EqualFold(test.Country, country) {
+			log.Printf("Worker proxyip test rejected %s: colo country=%s, want %s", result.IP, test.Country, country)
+			continue
+		}
 		// 用本地 GeoIP 数据库验证出口 IP 的注册归属地
 		if test.IP == "" {
 			log.Printf("Worker proxyip test rejected %s: no exit IP returned", result.IP)
